@@ -1,7 +1,7 @@
 """
 LinkedIn Post Agent - Main Runner
 Fetches news, picks best story, drafts a post, sends for approval via email.
-Run this on a schedule (cron / Render cron job).
+Run this on a schedule (cron / Railway cron job).
 """
 
 import os
@@ -10,17 +10,17 @@ import uuid
 import sqlite3
 import smtplib
 import feedparser
-import anthropic
+from openai import OpenAI
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# ── Config (set these as environment variables on Render) ──────────────────────
-ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
-EMAIL_SENDER        = os.environ["EMAIL_SENDER"]        # your Gmail address
-EMAIL_PASSWORD      = os.environ["EMAIL_APP_PASSWORD"]  # Gmail app password
-EMAIL_RECIPIENT     = os.environ["EMAIL_RECIPIENT"]     # where approval emails go
-APPROVAL_BASE_URL   = os.environ["APPROVAL_BASE_URL"]   # e.g. https://yourapp.onrender.com
+# ── Config (set these as environment variables on Railway) ─────────────────────
+OPENAI_API_KEY      = os.environ["OPENAI_API_KEY"]
+EMAIL_SENDER        = os.environ["EMAIL_SENDER"]
+EMAIL_PASSWORD      = os.environ["EMAIL_APP_PASSWORD"]
+EMAIL_RECIPIENT     = os.environ["EMAIL_RECIPIENT"]
+APPROVAL_BASE_URL   = os.environ["APPROVAL_BASE_URL"]
 DB_PATH             = os.environ.get("DB_PATH", "queue.db")
 
 # ── Keywords (grouped for smarter prompting) ───────────────────────────────────
@@ -41,7 +41,6 @@ RSS_FEEDS = [
     "https://feeds.occrp.org/organised-crime-and-corruption-reporting-project",
     "https://www.bellingcat.com/feed/",
     "https://www.transparency.org/en/rss",
-    "https://feeds.feedburner.com/ICIJ",
     "https://www.fatf-gafi.org/en/publications/rss.xml",
     "https://news.google.com/rss/search?q=money+laundering+sanctions&hl=en-US&gl=US&ceid=US:en",
     "https://news.google.com/rss/search?q=anti-corruption+financial+crime&hl=en-US&gl=US&ceid=US:en",
@@ -113,7 +112,6 @@ def fetch_rss_articles(max_per_feed=5):
     return articles
 
 def fetch_telegram_articles():
-    """Return URLs submitted via Telegram bot as article stubs."""
     rows = get_telegram_queue()
     articles = []
     for row_id, url in rows:
@@ -126,9 +124,9 @@ def fetch_telegram_articles():
         })
     return articles
 
-# ── Claude: pick best story + write post ──────────────────────────────────────
+# ── OpenAI: pick best story + write post ──────────────────────────────────────
 def pick_and_write(articles: list[dict]) -> dict:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
     article_list = "\n\n".join(
         f"{i+1}. TITLE: {a['title']}\n   URL: {a['url']}\n   SUMMARY: {a['summary']}"
@@ -149,7 +147,8 @@ Your goal: pick ONE story from the list below and write a LinkedIn post that:
 5. Feels human — short paragraphs, no corporate jargon, no buzzwords like "leverage" or "synergy"
 6. Is 150–220 words
 
-Relevant topic categories: {categories_text}
+Relevant topic categories:
+{categories_text}
 
 Articles to choose from:
 {article_list}
@@ -163,19 +162,15 @@ Respond ONLY in valid JSON with this exact structure:
   "linkedin_post": "<the full post text>"
 }}"""
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
         max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
     )
 
-    raw = response.content[0].text.strip()
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    raw = response.choices[0].message.content.strip()
+    return json.loads(raw)
 
 # ── Email approval ─────────────────────────────────────────────────────────────
 def send_approval_email(post_id: str, result: dict):
@@ -215,7 +210,6 @@ def run():
     init_db()
     print(f"[{datetime.utcnow().isoformat()}] Agent starting...")
 
-    # Gather articles (Telegram submissions first, then RSS)
     telegram_articles = fetch_telegram_articles()
     rss_articles = fetch_rss_articles()
     all_articles = telegram_articles + rss_articles
@@ -226,20 +220,16 @@ def run():
 
     print(f"Found {len(all_articles)} articles ({len(telegram_articles)} from Telegram queue)")
 
-    # Pick + write
-    result = pick_and_write(all_articles[:30])  # cap at 30 to stay within context
+    result = pick_and_write(all_articles[:30])
     print(f"Chosen: {result['chosen_title']}")
 
-    # Save to DB
     post_id = str(uuid.uuid4())
     save_post(post_id, result["linkedin_post"], result["chosen_url"], result["chosen_title"])
 
-    # Mark telegram items as processed
     for a in telegram_articles:
         if "_telegram_id" in a:
             mark_telegram_processed(a["_telegram_id"])
 
-    # Send approval email
     send_approval_email(post_id, result)
     print("Done.")
 
