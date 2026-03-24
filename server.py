@@ -14,13 +14,40 @@ from flask import Flask, request, jsonify, abort
 
 app = Flask(__name__)
 
-DB_PATH              = os.environ.get("DB_PATH", "queue.db")
+DB_PATH               = os.environ.get("DB_PATH", "queue.db")
 LINKEDIN_ACCESS_TOKEN = os.environ.get("LINKEDIN_ACCESS_TOKEN", "")
-LINKEDIN_PERSON_URN  = os.environ.get("LINKEDIN_PERSON_URN", "")   # urn:li:person:XXXXXXX
-TELEGRAM_BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_ALLOWED_ID  = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "")  # your personal chat ID
+LINKEDIN_PERSON_URN   = os.environ.get("LINKEDIN_PERSON_URN", "")
+TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_ALLOWED_ID   = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "")
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
+def init_db():
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'pending',
+            draft TEXT,
+            source_url TEXT,
+            source_title TEXT,
+            created_at TEXT,
+            approved_at TEXT
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT,
+            added_at TEXT,
+            processed INTEGER DEFAULT 0
+        )
+    """)
+    con.commit()
+    con.close()
+
+# Initialise DB immediately when the module loads (works with gunicorn too)
+init_db()
+
 def get_post(post_id):
     con = sqlite3.connect(DB_PATH)
     row = con.execute(
@@ -44,30 +71,6 @@ def add_to_telegram_queue(url):
         "INSERT INTO telegram_queue (url, added_at) VALUES (?, ?)",
         (url, datetime.utcnow().isoformat())
     )
-    con.commit()
-    con.close()
-
-def init_db():
-    con = sqlite3.connect(DB_PATH)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id TEXT PRIMARY KEY,
-            status TEXT DEFAULT 'pending',
-            draft TEXT,
-            source_url TEXT,
-            source_title TEXT,
-            created_at TEXT,
-            approved_at TEXT
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS telegram_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT,
-            added_at TEXT,
-            processed INTEGER DEFAULT 0
-        )
-    """)
     con.commit()
     con.close()
 
@@ -182,7 +185,6 @@ def telegram_webhook():
     if not text:
         return jsonify({"ok": True})
 
-    # Detect URLs
     if text.startswith("http://") or text.startswith("https://"):
         add_to_telegram_queue(text)
         telegram_reply(chat_id, f"✅ Added to queue:\n{text}\n\nI'll use it in the next post run.")
@@ -200,6 +202,5 @@ def telegram_webhook():
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
