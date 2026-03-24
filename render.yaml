@@ -1,0 +1,53 @@
+services:
+  # Web service — handles approvals + Telegram webhook
+  - type: web
+    name: linkedin-agent
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: EMAIL_SENDER
+        sync: false
+      - key: EMAIL_APP_PASSWORD
+        sync: false
+      - key: EMAIL_RECIPIENT
+        sync: false
+      - key: APPROVAL_BASE_URL
+        sync: false
+      - key: LINKEDIN_ACCESS_TOKEN
+        sync: false
+      - key: LINKEDIN_PERSON_URN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_CHAT_ID
+        sync: false
+      - key: DB_PATH
+        value: /var/data/queue.db
+    disk:
+      name: agent-data
+      mountPath: /var/data
+      sizeGB: 1
+
+  # Cron job — runs the agent Mon / Wed / Fri at 8am UTC
+  - type: cron
+    name: linkedin-agent-cron
+    env: python
+    buildCommand: pip install -r requirements.txt
+    schedule: "0 8 * * 1,3,5"
+    startCommand: python main.py
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: EMAIL_SENDER
+        sync: false
+      - key: EMAIL_APP_PASSWORD
+        sync: false
+      - key: EMAIL_RECIPIENT
+        sync: false
+      - key: APPROVAL_BASE_URL
+        sync: false
+      - key: DB_PATH
+        value: /var/data/queue.db
